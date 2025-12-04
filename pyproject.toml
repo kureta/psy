@@ -8,13 +8,16 @@ authors = [
 ]
 requires-python = ">=3.13"
 dependencies = [
+    "abjad>=3.31",
     "librosa>=0.11.0",
     "marimo>=0.18.1",
     "matplotlib>=3.10.7",
     "music21>=9.9.1",
     "numpy>=2.3.5",
     "polars>=1.35.2",
+    "pyaudio>=0.2.14",
     "scipy>=1.16.3",
+    "tinysoundfont>=0.3.7",
 ]
 
 [build-system]
