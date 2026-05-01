@@ -9,6 +9,7 @@ with app.setup:
     import matplotlib.pyplot as plt
     import plotly.graph_objects as go
     from plotly.subplots import make_subplots
+    import einx
 
 
 @app.function
@@ -18,8 +19,8 @@ def erb(x):
 
 @app.function
 def roughness(x, f0=110.0):
-    x /= erb(f0)
-    return 4 * np.abs(x) * np.exp(1 - 4 * np.abs(x))
+    t = x / erb(f0)
+    return 4 * np.abs(t) * np.exp(1 - 4 * np.abs(t))
 
 
 @app.cell
@@ -38,6 +39,7 @@ def _(x, y):
 @app.function
 def get_harmonics(n_partials=8, exp=1.0):
     amps = 1.0 / np.arange(1, n_partials + 1)
+    # amps = np.ones(n_partials)
     parts = np.arange(1, n_partials + 1) ** exp
 
     return amps, parts
@@ -45,174 +47,33 @@ def get_harmonics(n_partials=8, exp=1.0):
 
 @app.function
 def dissonance_curve(f_base, alpha_range, partials1, partials2):
-    # 1. Calculate amplitudes and pairwise weights
-    # amps shape: (N,) -> weights shape: (N, N)
     amps1, p1 = partials1
     amps2, p2 = partials2
-    weights = amps1[:, np.newaxis] * amps2[np.newaxis, :]
 
-    # 2. Setup partials with explicit dimensions for broadcasting
-    # p1 shape: (1, N, 1) - Tone 1 partials
-    p1 = (f_base * p1)[np.newaxis, :, np.newaxis]
+    # 1. Base frequencies for Tone 1 (n) and Tone 2 (a, m)
+    f1 = f_base * p1
+    f2 = f_base * einx.multiply("a, m -> a m", alpha_range, p2)
 
-    # p2 shape: (M, 1, N) - Tone 2 partials over all alphas
-    p2 = (
-        f_base
-        * alpha_range[:, np.newaxis, np.newaxis]
-        * p2[np.newaxis, np.newaxis, :]
-    )
+    # 2. Pairwise absolute differences and means across all ratios (a n m)
+    df = np.abs(einx.subtract("n, a m -> a n m", f1, f2))
+    f_mean = einx.add("n, a m -> a n m", f1, f2) / 2.0
 
-    # 3. Vectorized math. Resulting shapes are (M, N, N)
-    df = np.abs(p1 - p2)
-    f_mean = (p1 + p2) / 2.0
+    # 3. Calculate raw roughness
+    r = roughness(df, f_mean)
 
-    # 4. Calculate roughness, apply weights, and sum across the N x N grid
-    r = weights * roughness(df, f_mean)
+    # 4. Pairwise amplitude weights (n m)
+    weights = einx.multiply("n, m -> n m", amps1, amps2)
 
-    # Sum over axes 1 and 2 (the two partial dimensions) to get total roughness per alpha
-    return np.sum(r, axis=(1, 2))
+    # 5. Multiply roughness by weights and sum over the partials (n, m)
+    weighted_r = einx.dot("n m, a n m -> a", weights, r)
 
-
-@app.cell(hide_code=True)
-def _():
-    alpha_slider = mo.ui.slider(
-        start=1.0, stop=2.0, step=0.01, value=1.5, label="Frequency Ratio (Alpha)"
-    )
-    exp_slider = mo.ui.slider(
-        start=0.5,
-        stop=2.5,
-        step=0.01,
-        value=1.0,
-        label="Stretch Factor (Inharmonicity)",
-    )
-
-    mo.vstack([mo.md("### Interval & Spectra Explorer"), alpha_slider, exp_slider])
-    return alpha_slider, exp_slider
-
-
-@app.cell(hide_code=True)
-def _(alpha_slider, exp_slider):
-    f_base = 440.0
-    n_partials = 8
-
-    # 1. Grab current values from the UI
-    current_alpha = alpha_slider.value
-    current_exp = exp_slider.value
-
-    # 2. Compute Partials
-    partials1 = get_harmonics(n_partials, current_exp)
-    partials2 = get_harmonics(n_partials, current_exp)
-
-    # 3. Compute Dissonance Data
-    alpha_range = np.linspace(1.0, 2.0, 400)
-    diss = dissonance_curve(f_base, alpha_range, partials1, partials2)
-    current_diss = dissonance_curve(
-        f_base, np.array([current_alpha]), partials1, partials2
-    )[0]
-
-    # 4. Compute Spectral Data
-    f1 = f_base * partials1[1]
-    f2 = f_base * current_alpha * partials2[1]
-    a1 = partials1[0]
-    a2 = partials2[0]
-
-    # --- Plotting with Plotly ---
-    # Create a figure with 2 subplots
-    fig = make_subplots(
-        rows=2, cols=1, row_heights=[0.7, 0.3], vertical_spacing=0.15
-    )
-
-    # Top Plot: The Dissonance Curve
-    fig.add_trace(
-        go.Scatter(
-            x=alpha_range,
-            y=diss,
-            mode="lines",
-            line=dict(color="black", width=2),
-            name="Dissonance Curve",
-        ),
-        row=1,
-        col=1,
-    )
-
-    # Marker for the current interval
-    fig.add_trace(
-        go.Scatter(
-            x=[current_alpha],
-            y=[current_diss],
-            mode="markers",
-            marker=dict(color="red", size=12),
-            name="Current Ratio",
-        ),
-        row=1,
-        col=1,
-    )
-
-    # Vertical guideline
-    fig.add_vline(
-        x=current_alpha,
-        line_width=2,
-        line_dash="dash",
-        line_color="red",
-        opacity=0.5,
-        row=1,
-        col=1,
-    )
-
-    # Bottom Plot: Spectral Alignment
-    # Using Bar charts with a very thin width creates a great looking "stem" plot for spectra
-    fig.add_trace(
-        go.Bar(
-            x=f1,
-            y=a1,
-            name="Tone 1 (Base)",
-            marker_color="#1f77b4",
-            width=10,
-            opacity=0.75,
-        ),
-        row=2,
-        col=1,
-    )
-    fig.add_trace(
-        go.Bar(
-            x=f2,
-            y=a2,
-            name="Tone 2 (Shifted)",
-            marker_color="#ff7f0e",
-            width=10,
-            opacity=0.75,
-        ),
-        row=2,
-        col=1,
-    )
-
-    # Layout styling
-    fig.update_layout(
-        title=f"Sensory Dissonance (Stretch = {current_exp:.2f})",
-        height=650,
-        margin=dict(l=40, r=40, t=60, b=40),
-        hovermode="x unified",
-        showlegend=True,
-        legend=dict(
-            orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1
-        ),
-        barmode="overlay",
-    )
-
-    fig.update_yaxes(title_text="Total Roughness", row=1, col=1)
-    fig.update_xaxes(title_text="Frequency Ratio", row=1, col=1)
-    fig.update_yaxes(title_text="Amplitude", row=2, col=1)
-    fig.update_xaxes(title_text="Frequency (Hz)", row=2, col=1)
-
-    # In Marimo, returning the figure renders it natively as an interactive web element
-    fig
-    return
+    return weighted_r
 
 
 @app.cell(hide_code=True)
 def _():
     # Create options 1 through 16
-    partial_options = {f"Partial {i}": i for i in range(1, 65)}
+    partial_options = {f"Partial {i}": i for i in range(1, 9)}
 
     p1_dropdown = mo.ui.dropdown(
         options=partial_options,
@@ -261,8 +122,8 @@ def _(plot):
 @app.cell(hide_code=True)
 def _(exp_slider2, exp_slider3, p1_dropdown, p2_dropdown):
     def plot():
-        f_base = 220.0
-        n_partials = 64
+        f_base = 440.0
+        n_partials = 8
 
         # 1. Grab values from UI
         n = p1_dropdown.value
@@ -401,7 +262,7 @@ def _(exp_slider2, exp_slider3, p1_dropdown, p2_dropdown):
 
 @app.cell
 def _():
-    5/4, 3/4
+    5 / 4, 3 / 4
     return
 
 
